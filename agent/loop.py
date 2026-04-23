@@ -26,6 +26,18 @@ _SYSTEM = SYSTEM_PROMPT + "\n\n" + AVAILABLE_TOOLS
 _MAX_CONSECUTIVE_ERRORS = 3
 
 
+def _strip_code_fence(text: str) -> str:
+    """Remove markdown code fences that some models wrap JSON in."""
+    text = text.strip()
+    if text.startswith("```"):
+        # Drop the opening fence line (```json or just ```)
+        text = text.split("\n", 1)[-1]
+        # Drop the closing fence
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
 def run_agent_loop(
     task: str,
     get_poses_fn: Callable[[], dict],
@@ -68,6 +80,8 @@ def run_agent_loop(
     completed_steps: list[dict]  = []
     last_result:     dict | None = None
     consecutive_errors: int      = 0
+    gripper_open:    bool        = True   # track gripper state for the prompt
+    holding:         str | None  = None   # object currently held
 
     for step in range(1, max_steps + 1):
         if verbose:
@@ -77,8 +91,11 @@ def run_agent_loop(
         # 1. Observe current world state
         poses = get_poses_fn()
 
-        # 2. Format state prompt
-        state_prompt = format_state(poses, completed_steps, last_result, task)
+        # 2. Format state prompt (include gripper state so model knows what it holds)
+        state_prompt = format_state(
+            poses, completed_steps, last_result, task,
+            gripper_open=gripper_open, holding=holding,
+        )
         if verbose:
             print(state_prompt)
 
@@ -90,7 +107,7 @@ def run_agent_loop(
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": state_prompt}],
             )
-            raw_text = response.content[0].text.strip()
+            raw_text = _strip_code_fence(response.content[0].text)
         except Exception as exc:
             last_result = {"status": "error", "reason": f"LLM API error: {exc}"}
             history.append({"step": step, "action": None, "result": last_result})
@@ -144,6 +161,24 @@ def run_agent_loop(
             print(
                 f"Tool: {tool_call['tool']}({tool_call.get('args', {})}) → {status}"
             )
+
+        # 6b. Update gripper / holding state for the next prompt
+        if result.get("status") == "success":
+            tool = tool_call["tool"]
+            args = tool_call.get("args", {})
+            if tool == "open_gripper":
+                gripper_open = True
+                holding = None
+            elif tool == "close_gripper":
+                gripper_open = False
+            elif tool == "move_arm":
+                action = args.get("action")
+                if action == "grasp":
+                    gripper_open = False
+                    holding = args.get("target_object")
+                elif action == "place":
+                    gripper_open = True
+                    holding = None
 
         # 7. Check termination
         if result.get("status") == "done":

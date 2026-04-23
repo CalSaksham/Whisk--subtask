@@ -1,4 +1,4 @@
-anthropic
+anthropic>=0.96.0
 numpy
 pytest
 opencv-python

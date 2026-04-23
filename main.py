@@ -1,61 +1,101 @@
 """
-Entry point for the matcha-making robot agent (mock / development run).
+Entry point for the matcha-making robot agent.
+
+Pose source is selected with --poses flag:
+
+    mock    Use Gaussian-noised hardcoded poses (default, no hardware needed)
+    file    Read from poses.json — edit by hand or have any script write to it
+    server  Poll the local HTTP pose server (teammate integration, port 5050)
+    manual  Prompt user to type poses in the terminal each step
 
 Usage
 -----
-    cd whisk_agent
-    ANTHROPIC_API_KEY=sk-ant-... python main.py
+    ANTHROPIC_API_KEY=sk-ant-... python main.py              # mock poses
+    ANTHROPIC_API_KEY=sk-ant-... python main.py --poses file
+    ANTHROPIC_API_KEY=sk-ant-... python main.py --poses server
+    ANTHROPIC_API_KEY=sk-ant-... python main.py --poses manual
 
-Everything runs against the mock executor and mock pose data — no physical
-robot or camera required.  Replace get_mock_poses and mock_execute with real
-implementations to run on hardware.
+Arm executor
+------------
+    Always MockExecutor for now.  Swap for LeRobotExecutor when hardware ready.
 """
 
 from __future__ import annotations
 
+import argparse
+
 from agent.loop import run_agent_loop
 from agent.tools import dispatch_tool
 from arm.executor import MockExecutor
-from perception.mock_poses import get_mock_poses
+from perception.pose_bridge import (
+    FilePoseProvider,
+    ManualPoseProvider,
+    MockPoseProvider,
+    ServerPoseProvider,
+)
+
+
+TASK = (
+    "Make matcha: scoop matcha powder from the scoop into the bowl, "
+    "add hot water from the cup of water, add ice from the cup of ice, "
+    "whisk the mixture until frothy, then pour into the matcha cup."
+)
+
+
+def build_pose_provider(mode: str):
+    """Return the correct pose provider for *mode*."""
+    if mode == "mock":
+        print("[main] Pose source: mock (Gaussian noise on hardcoded values)")
+        return MockPoseProvider()
+    if mode == "file":
+        print("[main] Pose source: poses.json  (edit the file to update poses)")
+        return FilePoseProvider()
+    if mode == "server":
+        print("[main] Pose source: HTTP server at http://localhost:5050/poses")
+        print("[main] Start the server in another terminal:")
+        print("[main]   python perception/pose_server.py")
+        return ServerPoseProvider()
+    if mode == "manual":
+        print("[main] Pose source: manual terminal input each step")
+        return ManualPoseProvider()
+    raise ValueError(f"Unknown pose mode '{mode}'")
 
 
 def main() -> None:
-    """Wire perception, execution, and the LLM agent loop together."""
-
-    task = (
-        "Make matcha: scoop matcha powder from the scoop into the bowl, "
-        "add hot water from the cup of water, add ice from the cup of ice, "
-        "whisk the mixture until frothy, then pour into the matcha cup."
+    parser = argparse.ArgumentParser(description="Matcha robot agent")
+    parser.add_argument(
+        "--poses",
+        choices=["mock", "file", "server", "manual"],
+        default="mock",
+        help="Pose source backend (default: mock)",
     )
+    args = parser.parse_args()
 
-    # ---- Executor setup ----------------------------------------------------
-    # MockExecutor logs every call.  To run on a real SO-101, swap this for a
-    # LeRobotExecutor that sends commands over the hardware SDK.
+    # ---- Pose provider ---------------------------------------------------
+    provider = build_pose_provider(args.poses)
+
+    # ---- Executor --------------------------------------------------------
+    # MockExecutor logs every call with [MOCK] prefix.
+    # Swap for LeRobotExecutor() when hardware is ready.
     executor = MockExecutor()
 
-    def mock_execute(tool_call: dict, pose_map: dict) -> dict:
-        """
-        Thin dispatch wrapper — the only line that needs changing for real HW.
-
-        Signature matches what run_agent_loop expects:
-            (tool_call: dict, pose_map: dict) → result: dict
-        """
+    def execute(tool_call: dict, pose_map: dict) -> dict:
         return dispatch_tool(tool_call, pose_map, executor)
 
-    # ---- Run ---------------------------------------------------------------
+    # ---- Run -------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("MATCHA ROBOT")
     print("=" * 60)
-    print("MATCHA ROBOT — MOCK RUN")
-    print("=" * 60)
-    print(f"Task: {task}\n")
+    print(f"Task: {TASK}\n")
 
     history = run_agent_loop(
-        task=task,
-        get_poses_fn=get_mock_poses,
-        execute_tool_fn=mock_execute,
+        task=TASK,
+        get_poses_fn=provider.get_poses,
+        execute_tool_fn=execute,
         verbose=True,
     )
 
-    # ---- Summary -----------------------------------------------------------
+    # ---- Summary ---------------------------------------------------------
     print("\n" + "=" * 60)
     print(f"Completed in {len(history)} steps")
     print("=" * 60)
