@@ -39,6 +39,7 @@ mock-only environments still import this module fine.
 from __future__ import annotations
 
 import math
+import time
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -327,3 +328,131 @@ def _trapezoidal_s(
         tau = t - t_accel - t_cruise
         return s_cruise_end + v_p * tau - 0.5 * v_p * tau * tau / t_decel if t_decel > 0 else 1.0
     return 1.0
+
+
+# ---------------------------------------------------------------------------
+# LeRobot SDK adapter — concrete MotionSDK implementation
+# ---------------------------------------------------------------------------
+#
+# Workspace safety limits in the executor's y-up frame (metres, robot base).
+# y is vertical (positive = up); x is forward reach; z is left/right.
+# Tune these to your table BEFORE the first real run — the adapter refuses
+# any joint waypoint whose FK lands outside this box.
+#
+# Starting values below are conservative for a desktop SO-101 with the base
+# clamped at the rear of the table, matcha items on a tray in front.
+SO101_WORKSPACE_LIMITS: dict[str, tuple[float, float]] = {
+    "x": (0.08, 0.28),    # forward reach (avoid self-collision + low-accuracy extension)
+    "y": (0.01, 0.20),    # height (1 cm floor buffer; cap below full extension)
+    "z": (-0.18, 0.18),   # left/right (stay clear of singularity cones)
+}
+
+# SO-101 has 5 arm joints; the gripper is a 6th servo addressed separately.
+SO101_JOINT_NAMES: list[str] = [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+]
+
+# Gripper geometry: SDK scale is 0..100 where 0 = fully open, 100 = fully closed.
+# The executor speaks metres, so we convert through GRIPPER_MAX_WIDTH_M.
+GRIPPER_MAX_WIDTH_M: float = 0.08
+GRIPPER_SETTLE_S:    float = 0.6   # servo is slower than the arm joints
+
+
+class WorkspaceViolation(RuntimeError):
+    """Raised when a commanded configuration would exit the safe Cartesian box."""
+
+
+class LeRobotMotionAdapter:
+    """
+    Adapts the LeRobot ``SOFollower`` SDK to the :class:`MotionSDK` protocol.
+
+    Pair with :class:`arm.placo_kinematics.PlacoKinematics` to get a full
+    :class:`LeRobotExecutor`.  The adapter is intentionally thin: it forwards
+    joint reads, streams joint-position commands at the rate the executor
+    picks, and maps gripper width (m) to the SDK's 0..100 scale.
+
+    The ``forward_kinematics_fn`` argument is optional but strongly
+    recommended — when supplied, every streamed waypoint is FK-checked
+    against :data:`SO101_WORKSPACE_LIMITS` before being sent, so a
+    singularity-free joint path that would still drive the gripper into the
+    table is rejected.  Pass ``kinematics.forward_kinematics`` from the
+    Placo backend.
+    """
+
+    def __init__(
+        self,
+        robot,
+        joint_names: list[str] = SO101_JOINT_NAMES,
+        workspace_limits: dict[str, tuple[float, float]] | None = SO101_WORKSPACE_LIMITS,
+        forward_kinematics_fn=None,
+        gripper_max_width_m: float = GRIPPER_MAX_WIDTH_M,
+        gripper_settle_s:    float = GRIPPER_SETTLE_S,
+    ) -> None:
+        self._robot            = robot
+        self._joint_names      = list(joint_names)
+        self._limits           = dict(workspace_limits) if workspace_limits else None
+        self._fk               = forward_kinematics_fn
+        self._gripper_max      = float(gripper_max_width_m)
+        self._gripper_settle_s = float(gripper_settle_s)
+
+    # ---------------------------------------------------------------- MotionSDK
+    def get_joint_positions(self) -> list[float]:
+        obs = self._robot.get_observation()
+        return [float(obs[f"{j}.pos"]) for j in self._joint_names]
+
+    def execute_joint_trajectory(
+        self,
+        joint_waypoints: list[list[float]],
+        durations: list[float],
+    ) -> None:
+        """
+        Stream *joint_waypoints* to the robot, sleeping *durations[i]* between
+        sample i and i+1.  Blocks until the last waypoint has been sent.
+
+        ``send_action`` on the SO follower is non-blocking, so pacing with
+        sleeps is what synchronises the Python side with the servo loop.
+        """
+        if len(joint_waypoints) != len(durations):
+            raise ValueError(
+                f"waypoint/duration length mismatch: "
+                f"{len(joint_waypoints)} vs {len(durations)}"
+            )
+
+        for q, dt in zip(joint_waypoints, durations):
+            self._assert_in_workspace(q)
+            self._robot.send_action(self._joints_to_action(q))
+            if dt > 0:
+                time.sleep(dt)
+
+    def set_gripper(self, width: float) -> None:
+        w  = max(0.0, min(float(width), self._gripper_max))
+        # 0 m (closed) → 100, max width (open) → 0
+        pos = (1.0 - w / self._gripper_max) * 100.0
+        self._robot.send_action({"gripper.pos": max(0.0, min(100.0, pos))})
+        time.sleep(self._gripper_settle_s)
+
+    # ---------------------------------------------------------------- Internals
+    def _joints_to_action(self, q: list[float]) -> dict:
+        if len(q) != len(self._joint_names):
+            raise ValueError(
+                f"expected {len(self._joint_names)} joint values, got {len(q)}"
+            )
+        return {f"{name}.pos": float(v) for name, v in zip(self._joint_names, q)}
+
+    def _assert_in_workspace(self, joints: list[float]) -> None:
+        """Reject joint configurations whose FK lands outside the safe box."""
+        if self._limits is None or self._fk is None:
+            return
+        pose = self._fk(joints)
+        x, y, z = pose[0], pose[1], pose[2]
+        for axis, val in (("x", x), ("y", y), ("z", z)):
+            lo, hi = self._limits[axis]
+            if not (lo <= val <= hi):
+                raise WorkspaceViolation(
+                    f"waypoint {axis}={val:.4f} m outside safe range "
+                    f"[{lo}, {hi}] m — motion aborted."
+                )

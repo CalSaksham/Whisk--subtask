@@ -47,7 +47,43 @@ def confirm(prompt: str = "Press Enter to continue (Ctrl-C to abort)...") -> Non
         sys.exit(0)
 
 
-def run_grasp_test(object_name: str, dry_run: bool, safe_height: float) -> None:
+def _build_hardware_executor(port: str, urdf_path: str, ee_frame: str):
+    """
+    Construct a real-hardware LeRobotExecutor and return (executor, cleanup_fn).
+
+    The cleanup_fn disconnects the robot cleanly — the caller MUST call it
+    in a try/finally so torque is released even if the test aborts.
+    """
+    from lerobot.robots.so_follower import SOFollower, SO101FollowerRobotConfig
+    from arm.lerobot_executor import LeRobotExecutor, LeRobotMotionAdapter
+    from arm.placo_kinematics import PlacoKinematics
+
+    robot = SOFollower(SO101FollowerRobotConfig(
+        robot_type="so101_follower", id="whisk_arm", port=port,
+    ))
+    robot.connect(calibrate=False)
+
+    kin      = PlacoKinematics(urdf_path, end_effector_frame=ee_frame)
+    motion   = LeRobotMotionAdapter(robot, forward_kinematics_fn=kin.forward_kinematics)
+    executor = LeRobotExecutor(kin, motion)
+
+    def cleanup() -> None:
+        try:
+            robot.disconnect()
+        except Exception as exc:
+            print(f"[warn] disconnect failed: {exc}")
+
+    return executor, cleanup
+
+
+def run_grasp_test(
+    object_name: str,
+    dry_run: bool,
+    safe_height: float,
+    port: str | None = None,
+    urdf_path: str = "assets/so101.urdf",
+    ee_frame: str = "gripper",
+) -> None:
     print(f"\n{'=' * 60}")
     print(f"Single-grasp test: {object_name}  (dry_run={dry_run})")
     print("=" * 60)
@@ -63,19 +99,24 @@ def run_grasp_test(object_name: str, dry_run: bool, safe_height: float) -> None:
     target_pose  = MOCK_POSES[object_name]
     grasp_config = GRASP_CONFIGS[object_name]
 
+    cleanup = lambda: None
     if dry_run:
         executor = MockExecutor()
         print("[DRY RUN] Using MockExecutor — no real motion.")
     else:
-        # --- Real hardware ---
-        # Uncomment when LeRobotExecutor is implemented:
-        # from arm.lerobot_executor import LeRobotExecutor
-        # executor = LeRobotExecutor()
-        # executor.connect()
-        print("ERROR: real hardware not yet implemented.")
-        print("Run with --dry-run to test trajectory planning.")
-        sys.exit(1)
+        if not port:
+            print("ERROR: --real requires --port (e.g. /dev/tty.usbmodem...).")
+            sys.exit(1)
+        executor, cleanup = _build_hardware_executor(port, urdf_path, ee_frame)
+        print(f"[REAL] Connected on {port}; URDF={urdf_path}; EE frame={ee_frame}")
 
+    try:
+        _run_grasp_body(executor, target_pose, grasp_config, safe_height)
+    finally:
+        cleanup()
+
+
+def _run_grasp_body(executor, target_pose, grasp_config, safe_height):
     # ---- Step 0: show plan ----
     current_pose = executor.get_end_effector_pose()
     waypoints    = compute_grasp_trajectory(current_pose, target_pose, grasp_config, safe_height)
@@ -153,10 +194,28 @@ def main() -> None:
         default=0.30,
         help="Safe transit height in metres (default 0.30)",
     )
+    parser.add_argument(
+        "--port",
+        default=None,
+        help="Serial port for the SO-101 (required with --real)",
+    )
+    parser.add_argument(
+        "--urdf",
+        default="assets/so101.urdf",
+        help="Path to SO-101 URDF (run scripts/download_urdf.py first)",
+    )
+    parser.add_argument(
+        "--ee-frame",
+        default="gripper",
+        help="End-effector frame name in the URDF (grep the URDF to confirm)",
+    )
     args = parser.parse_args()
 
     dry_run = not args.real
-    run_grasp_test(args.object, dry_run, args.safe_height)
+    run_grasp_test(
+        args.object, dry_run, args.safe_height,
+        port=args.port, urdf_path=args.urdf, ee_frame=args.ee_frame,
+    )
 
 
 if __name__ == "__main__":

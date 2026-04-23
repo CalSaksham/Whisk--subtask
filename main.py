@@ -35,6 +35,38 @@ from perception.pose_bridge import (
 )
 
 
+def build_executor(hardware: bool, port: str | None, urdf_path: str, ee_frame: str):
+    """Return (executor, cleanup_fn).  cleanup must be called in a finally block."""
+    if not hardware:
+        print("[main] Executor: MockExecutor (no real motion)")
+        return MockExecutor(), (lambda: None)
+
+    if not port:
+        raise SystemExit("ERROR: --hardware requires --port (e.g. /dev/tty.usbmodem...).")
+
+    from lerobot.robots.so_follower import SOFollower, SO101FollowerRobotConfig
+    from arm.lerobot_executor import LeRobotExecutor, LeRobotMotionAdapter
+    from arm.placo_kinematics import PlacoKinematics
+
+    print(f"[main] Executor: LeRobotExecutor on {port} (URDF={urdf_path}, EE={ee_frame})")
+    robot = SOFollower(SO101FollowerRobotConfig(
+        robot_type="so101_follower", id="whisk_arm", port=port,
+    ))
+    robot.connect(calibrate=False)
+
+    kin      = PlacoKinematics(urdf_path, end_effector_frame=ee_frame)
+    motion   = LeRobotMotionAdapter(robot, forward_kinematics_fn=kin.forward_kinematics)
+    executor = LeRobotExecutor(kin, motion)
+
+    def cleanup() -> None:
+        try:
+            robot.disconnect()
+        except Exception as exc:
+            print(f"[main] disconnect failed: {exc}")
+
+    return executor, cleanup
+
+
 TASK = (
     "Make matcha: scoop matcha powder from the scoop into the bowl, "
     "add hot water from the cup of water, add ice from the cup of ice, "
@@ -69,15 +101,33 @@ def main() -> None:
         default="mock",
         help="Pose source backend (default: mock)",
     )
+    parser.add_argument(
+        "--hardware",
+        action="store_true",
+        help="Use LeRobotExecutor on the real SO-101 (default: MockExecutor)",
+    )
+    parser.add_argument(
+        "--port",
+        default=None,
+        help="Serial port for the SO-101 (required with --hardware)",
+    )
+    parser.add_argument(
+        "--urdf",
+        default="assets/so101.urdf",
+        help="Path to SO-101 URDF (run scripts/download_urdf.py first)",
+    )
+    parser.add_argument(
+        "--ee-frame",
+        default="gripper",
+        help="End-effector frame name in the URDF",
+    )
     args = parser.parse_args()
 
     # ---- Pose provider ---------------------------------------------------
     provider = build_pose_provider(args.poses)
 
     # ---- Executor --------------------------------------------------------
-    # MockExecutor logs every call with [MOCK] prefix.
-    # Swap for LeRobotExecutor() when hardware is ready.
-    executor = MockExecutor()
+    executor, cleanup = build_executor(args.hardware, args.port, args.urdf, args.ee_frame)
 
     def execute(tool_call: dict, pose_map: dict) -> dict:
         return dispatch_tool(tool_call, pose_map, executor)
@@ -88,12 +138,15 @@ def main() -> None:
     print("=" * 60)
     print(f"Task: {TASK}\n")
 
-    history = run_agent_loop(
-        task=TASK,
-        get_poses_fn=provider.get_poses,
-        execute_tool_fn=execute,
-        verbose=True,
-    )
+    try:
+        history = run_agent_loop(
+            task=TASK,
+            get_poses_fn=provider.get_poses,
+            execute_tool_fn=execute,
+            verbose=True,
+        )
+    finally:
+        cleanup()
 
     # ---- Summary ---------------------------------------------------------
     print("\n" + "=" * 60)
