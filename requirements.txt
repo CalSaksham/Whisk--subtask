@@ -1,0 +1,5 @@
+anthropic
+numpy
+pytest
+opencv-python
+apriltag
