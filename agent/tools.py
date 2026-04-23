@@ -15,6 +15,7 @@ from arm.grasp_configs import GRASP_CONFIGS
 from arm.trajectory import (
     compute_grasp_trajectory,
     compute_place_trajectory,
+    compute_side_grasp_trajectory,
     compute_trajectory,
 )
 
@@ -150,21 +151,45 @@ def dispatch_tool(tool_call: dict, pose_map: dict, executor) -> dict:
         target_pose  = pose_map[target_obj]
         current_pose = executor.get_end_effector_pose()
 
+        # Every other object on the workbench is a potential obstacle.
+        # Pair each with its object_height (defaulting to 0 if unknown).
+        obstacles = [
+            (pose, float(GRASP_CONFIGS.get(name, {}).get("object_height", 0.0)))
+            for name, pose in pose_map.items()
+            if name != target_obj
+        ]
+
         if action == "grasp":
             if target_obj not in GRASP_CONFIGS:
                 return {
                     "status": "error",
                     "reason": f"no grasp config for '{target_obj}'",
                 }
-            waypoints = compute_grasp_trajectory(
-                current_pose, target_pose, GRASP_CONFIGS[target_obj]
-            )
+            cfg = GRASP_CONFIGS[target_obj]
+
+            # Pre-open gripper to the per-object grip_width so jaws are
+            # already close to the correct opening when descent begins.
+            executor.set_gripper(float(cfg.get("grip_width", _GRIPPER_OPEN_M)))
+
+            approach_axis = cfg.get("approach_axis", "y")
+            if approach_axis == "y":
+                waypoints = compute_grasp_trajectory(
+                    current_pose, target_pose, cfg, obstacles=obstacles,
+                )
+            else:  # "yaw_aligned", "x", "z" — all side-approach variants
+                waypoints = compute_side_grasp_trajectory(
+                    current_pose, target_pose, cfg, obstacles=obstacles,
+                )
 
         elif action == "place":
-            waypoints = compute_place_trajectory(current_pose, target_pose)
+            waypoints = compute_place_trajectory(
+                current_pose, target_pose, obstacles=obstacles,
+            )
 
         else:  # hover
-            waypoints = compute_trajectory(current_pose, target_pose)
+            waypoints = compute_trajectory(
+                current_pose, target_pose, obstacles=obstacles,
+            )
 
         # Execute each waypoint; abort on first failure.
         for idx, wp in enumerate(waypoints):

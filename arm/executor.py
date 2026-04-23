@@ -7,6 +7,16 @@ in a ``LeRobotExecutor`` class — nothing else in the codebase changes.
 
 The :class:`MockExecutor` logs every call with a ``[MOCK]`` prefix so it
 is immediately obvious that no physical motion is occurring.
+
+Pose convention
+---------------
+End-effector poses are expressed as ``[x, y, z, yaw]``:
+
+* ``x, y, z`` — metres in the robot base frame (y is vertical, positive up).
+* ``yaw``     — rotation about the world-vertical axis, radians.
+                yaw=0 means the wrist's natural zero (gripper jaws aligned
+                with the robot's x-axis).  Positive yaw follows the
+                right-hand rule about +y.
 """
 
 from __future__ import annotations
@@ -28,14 +38,15 @@ class Executor(Protocol):
 
     def move_to(self, waypoint: list[float]) -> dict:
         """
-        Command the arm to move its end-effector to *waypoint* = [x, y, z].
+        Command the arm to move its end-effector to *waypoint* = [x, y, z, yaw].
 
         The implementation is responsible for velocity limiting, joint-space
         interpolation, IK solving, and collision avoidance.  This call blocks
         until the waypoint is reached or an error occurs.
 
         Args:
-            waypoint: Target [x, y, z] position in metres (robot base frame).
+            waypoint: Target ``[x, y, z, yaw]`` — xyz in metres (robot base
+                      frame), yaw in radians about world-vertical.
 
         Returns:
             Result dict with ``"status"`` key.
@@ -59,9 +70,10 @@ class Executor(Protocol):
 
     def get_end_effector_pose(self) -> list[float]:
         """
-        Return the current end-effector position as [x, y, z] in metres.
+        Return the current end-effector pose as ``[x, y, z, yaw]``.
 
-        In production this reads from forward kinematics or a pose sensor.
+        xyz in metres; yaw in radians about world-vertical.  In production
+        this reads from forward kinematics or a pose sensor.
         """
         ...
 
@@ -75,7 +87,8 @@ class MockExecutor:
     is tracked so that sequential calls behave consistently.
     """
 
-    _RESTING_POSE: list[float] = [0.0, 0.35, 0.0]  # safe home position above workspace
+    # Safe home position above workspace: [x, y, z, yaw]
+    _RESTING_POSE: list[float] = [0.0, 0.35, 0.0, 0.0]
 
     def __init__(self) -> None:
         self._pose: list[float] = list(self._RESTING_POSE)
@@ -87,14 +100,17 @@ class MockExecutor:
         Simulate moving to *waypoint* and update internal pose tracking.
 
         Args:
-            waypoint: Target [x, y, z] in metres.
+            waypoint: Target ``[x, y, z, yaw]``; xyz in metres, yaw in radians.
 
         Returns:
-            ``{"status": "success", "pose": [x, y, z]}``
+            ``{"status": "success", "pose": [x, y, z, yaw]}``
         """
-        x, y, z = waypoint
-        print(f"[MOCK] move_to([{x:.4f}, {y:.4f}, {z:.4f}])")
-        self._pose = [float(x), float(y), float(z)]
+        x, y, z, yaw = waypoint
+        print(
+            f"[MOCK] move_to([{x:.4f}, {y:.4f}, {z:.4f}, "
+            f"yaw={yaw:.3f} rad])"
+        )
+        self._pose = [float(x), float(y), float(z), float(yaw)]
         return {"status": "success", "pose": list(self._pose)}
 
     def set_gripper(self, width: float) -> dict:
@@ -117,7 +133,7 @@ class MockExecutor:
         Return the last commanded pose (mock has no sensor — uses dead reckoning).
 
         Returns:
-            [x, y, z] in metres.
+            ``[x, y, z, yaw]`` — xyz in metres, yaw in radians.
         """
         pose = list(self._pose)
         print(f"[MOCK] get_end_effector_pose() → {[round(v, 4) for v in pose]}")

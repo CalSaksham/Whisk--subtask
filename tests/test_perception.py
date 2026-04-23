@@ -23,12 +23,12 @@ def test_mock_poses_has_all_expected_keys():
     assert set(poses.keys()) == EXPECTED_OBJECTS
 
 
-def test_pose_values_are_float_lists_of_length_3():
-    """Each pose must be a list of three Python floats."""
+def test_pose_values_are_float_lists_of_length_4():
+    """Each pose must be a list of four Python floats: [x, y, z, yaw]."""
     poses = get_mock_poses()
     for name, pose in poses.items():
         assert isinstance(pose, list), f"{name}: pose is not a list"
-        assert len(pose) == 3, f"{name}: expected 3 coords, got {len(pose)}"
+        assert len(pose) == 4, f"{name}: expected 4 coords (x,y,z,yaw), got {len(pose)}"
         for i, val in enumerate(pose):
             assert isinstance(val, float), (
                 f"{name}[{i}] is {type(val).__name__}, expected float"
@@ -39,13 +39,13 @@ def test_pose_values_are_float_lists_of_length_3():
 # Noise behaviour
 # ---------------------------------------------------------------------------
 
-def test_gaussian_noise_within_5_sigma():
-    """Noise should be statistically indistinguishable from zero beyond 5σ."""
+def test_position_noise_within_5_sigma():
+    """Position noise should be statistically indistinguishable from zero beyond 5σ."""
     noise_std = 0.002
-    threshold = 5 * noise_std  # 0.010 m — chance of exceeding ≈ 1 in 3.5 M
+    threshold = 5 * noise_std  # 0.010 m
 
     for trial in range(50):
-        poses = get_mock_poses(noise_std=noise_std)
+        poses = get_mock_poses(noise_std=noise_std, yaw_noise_std=0.0)
         for name, pose in poses.items():
             original = MOCK_POSES[name]
             for i in range(3):
@@ -56,15 +56,30 @@ def test_gaussian_noise_within_5_sigma():
                 )
 
 
+def test_yaw_noise_within_5_sigma():
+    """Yaw noise should stay within 5σ of the nominal yaw."""
+    yaw_std = 0.05
+    threshold = 5 * yaw_std
+
+    for trial in range(50):
+        poses = get_mock_poses(noise_std=0.0, yaw_noise_std=yaw_std)
+        for name, pose in poses.items():
+            original_yaw = MOCK_POSES[name][3]
+            deviation = abs(pose[3] - original_yaw)
+            assert deviation < threshold, (
+                f"Trial {trial}: {name} yaw deviated {deviation:.4f} rad "
+                f"(threshold {threshold:.4f} rad)"
+            )
+
+
 def test_noise_is_nonzero_on_average():
     """Sanity check: at least some noise must be added across many calls."""
     deviations = []
     for _ in range(30):
-        poses = get_mock_poses(noise_std=0.002)
+        poses = get_mock_poses(noise_std=0.002, yaw_noise_std=0.05)
         for name, pose in poses.items():
             original = MOCK_POSES[name]
-            deviations.extend(abs(pose[i] - original[i]) for i in range(3))
-    # Mean absolute deviation should be non-trivially positive (≈ 0.0016 m)
+            deviations.extend(abs(pose[i] - original[i]) for i in range(4))
     assert sum(deviations) / len(deviations) > 1e-6, "Noise appears to be zero"
 
 

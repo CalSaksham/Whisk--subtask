@@ -5,6 +5,17 @@ This module shows the production interface.  During development, use
 :func:`perception.mock_poses.get_mock_poses` instead; it is a drop-in
 replacement that returns the same dict structure.
 
+Return shape
+------------
+``get_poses()`` returns a mapping ``{object_name: [x, y, z, yaw]}`` where:
+
+* ``x, y, z`` — metres in the robot base frame (y is vertical, positive up).
+* ``yaw``     — radians about **world-vertical** (world +y), NOT about the
+                camera's y-axis or the tag's local y-axis.  Positive yaw
+                follows the right-hand rule about +y.  For rotationally
+                symmetric objects (cups, bowls) yaw is reported but is
+                physically meaningless; downstream planning ignores it.
+
 Production setup expected
 --------------------------
 * A calibrated RGB camera mounted with known extrinsics relative to the
@@ -49,8 +60,12 @@ class AprilTagDetector:
         5: "cup_of_water",
     }
 
-    # Physical offset from the tag's detected centre to the object's
-    # grasping centroid, expressed in the tag's local frame [x, y, z] m.
+    # Position-only offset (metres) from the tag's detected centre to the
+    # object's grasping centroid, expressed in the tag's local frame
+    # ``[x, y, z]``.  Yaw is derived directly from the tag's detected
+    # orientation about world-vertical — no per-object yaw offset is
+    # currently applied (handle objects have their tag aligned with the
+    # handle axis during fabrication).
     TAG_OFFSETS: dict[int, list[float]] = {
         0: [0.0,  0.04, 0.0],   # cup: tag on side, centroid 4 cm higher
         1: [0.0,  0.025, 0.0],  # bowl: tag on rim
@@ -97,7 +112,8 @@ class AprilTagDetector:
             frame: BGR image from ``cv2.VideoCapture.read()``.
 
         Returns:
-            Dict mapping object name → [x, y, z] in robot base frame (metres).
+            Dict mapping object name → ``[x, y, z, yaw]`` in robot base
+            frame (xyz in metres, yaw in radians about world-vertical).
             Objects not visible in *frame* are omitted.
 
         Raises:
@@ -111,6 +127,10 @@ class AprilTagDetector:
     def get_poses(self) -> dict[str, list[float]]:
         """
         Capture a frame from the attached camera and return all detected poses.
+
+        Returns:
+            Dict mapping object name → ``[x, y, z, yaw]``.  See module
+            docstring for the frame and yaw convention.
 
         Raises:
             NotImplementedError: Replace with real implementation.

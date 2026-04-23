@@ -19,8 +19,8 @@ from agent.loop import run_agent_loop
 # ---------------------------------------------------------------------------
 
 SAMPLE_POSES: dict[str, list[float]] = {
-    "matcha_cup":  [0.30, 0.02, 0.40],
-    "matcha_bowl": [0.10, 0.02, 0.40],
+    "matcha_cup":  [0.30, 0.02, 0.40, 0.0],
+    "matcha_bowl": [0.10, 0.02, 0.40, 0.0],
 }
 
 

@@ -83,9 +83,11 @@ def format_state(
     lines: list[str] = []
 
     # --- Object poses -------------------------------------------------------
+    # Yaw is omitted from the prompt: the LLM doesn't pick approach geometry
+    # (GRASP_CONFIGS does), so rendering yaw would just burn tokens.
     lines.append("OBJECTS:")
     for name, pose in poses.items():
-        x, y, z = pose
+        x, y, z = pose[0], pose[1], pose[2]
         lines.append(f"  {name}: x={x:.3f} y={y:.3f} z={z:.3f}")
 
     # --- Recent history (last 5 steps) -------------------------------------
