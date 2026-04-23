@@ -37,10 +37,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+
+# Allow running as `python perception/pose_server.py` from the project root
+# as well as importing as a module.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from perception.mock_poses import MOCK_POSES
 
