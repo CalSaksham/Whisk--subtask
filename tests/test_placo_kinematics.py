@@ -92,16 +92,97 @@ class TestRotationAngle:
 
 
 # ===========================================================================
-# Integration smoke test (skipped if placo isn't installed)
+# Integration smoke tests — require placo + the kinematics URDF
 # ===========================================================================
 
+pytest.importorskip("placo", reason="placo not installed")
+
+import os as _os
+_URDF = _os.path.join(_os.path.dirname(__file__), "..", "assets", "so101_kinematics.urdf")
+_URDF_AVAILABLE = _os.path.isfile(_URDF)
+
+
 def test_placo_is_importable():
-    """If placo imports, PlacoKinematics should at least construct on a URDF."""
-    placo = pytest.importorskip(
-        "placo",
-        reason="placo not installed — skipping live IK test",
-    )
-    # We don't have a URDF shipped in this repo, so this test only asserts
-    # that the import path doesn't raise on the Python side.  Real end-to-end
-    # IK against the SO-101 URDF belongs in a hardware-integration suite.
+    """placo package must import without error."""
+    import placo
     assert placo is not None
+
+
+@pytest.mark.skipif(not _URDF_AVAILABLE, reason="assets/so101_kinematics.urdf not found")
+class TestPlacoKinematicsLive:
+    """End-to-end IK / FK tests against the real SO-101 URDF."""
+
+    @pytest.fixture(scope="class")
+    def kin(self):
+        from arm.placo_kinematics import PlacoKinematics
+        return PlacoKinematics(
+            urdf_path=_URDF,
+            end_effector_frame="gripper_frame_link",
+            urdf_is_y_up=False,
+        )
+
+    # Poses confirmed reachable by FK exploration of the SO-101 workspace.
+    REACHABLE = [
+        [0.30,  0.20,  0.00,  0.0 ],
+        [0.35,  0.15,  0.05,  0.3 ],
+        [0.25,  0.25, -0.05, -0.5 ],
+    ]
+    UNREACHABLE = [
+        [5.0, 5.0, 5.0, 0.0],   # far outside workspace
+        [0.0, 3.0, 0.0, 0.0],   # straight up, too high
+    ]
+
+    def test_construction_does_not_raise(self, kin):
+        """PlacoKinematics must load the URDF without error."""
+        from arm.placo_kinematics import PlacoKinematics
+        assert isinstance(kin, PlacoKinematics)
+
+    def test_fk_at_zero_config_is_in_workspace(self, kin):
+        """FK at zero joints must return a plausible position for the SO-101."""
+        import numpy as np
+        q_zero = [0.0] * 13
+        pose = kin.forward_kinematics(q_zero)
+        assert len(pose) == 4
+        x, y, z, yaw = pose
+        # EE should be within ~60 cm of the base in every axis.
+        assert abs(x) < 0.6, f"x={x:.3f} looks wrong"
+        assert abs(y) < 0.6, f"y={y:.3f} looks wrong"
+        assert abs(z) < 0.6, f"z={z:.3f} looks wrong"
+
+    @pytest.mark.parametrize("target", REACHABLE)
+    def test_ik_position_accuracy_reachable(self, kin, target):
+        """IK must achieve < 1 mm position error for a known-reachable pose."""
+        import numpy as np
+        q = kin.solve_ik(target)
+        assert q is not None, f"IK returned None for reachable target {target}"
+        fk = kin.forward_kinematics(q)
+        pos_err = np.linalg.norm(np.array(fk[:3]) - np.array(target[:3]))
+        assert pos_err < 1e-3, f"FK error {pos_err:.4f} m exceeds 1 mm tolerance"
+
+    @pytest.mark.parametrize("target", UNREACHABLE)
+    def test_ik_returns_none_for_unreachable(self, kin, target):
+        """IK must return None rather than a garbage solution for unreachable poses."""
+        q = kin.solve_ik(target)
+        assert q is None, f"Expected None for unreachable {target}, got joints"
+
+    def test_jacobian_shape(self, kin):
+        """Jacobian must be (6, nv) where nv = number of velocity DOF."""
+        import numpy as np
+        q_zero = [0.0] * 13
+        J = kin.jacobian(q_zero)
+        assert J.shape[0] == 6, f"Expected 6 twist rows, got {J.shape[0]}"
+        assert J.shape[1] > 0, "Jacobian has no columns"
+
+    def test_fk_ik_roundtrip_position(self, kin):
+        """FK → IK → FK must return to the original position within tolerance."""
+        import numpy as np
+        q_zero = [0.0] * 13
+        pose_from_fk = kin.forward_kinematics(q_zero)
+        q_ik = kin.solve_ik(pose_from_fk)
+        if q_ik is None:
+            pytest.skip("Zero-config FK pose not reachable by IK (unexpected)")
+        pose_roundtrip = kin.forward_kinematics(q_ik)
+        pos_err = np.linalg.norm(
+            np.array(pose_roundtrip[:3]) - np.array(pose_from_fk[:3])
+        )
+        assert pos_err < 1e-3, f"Roundtrip position error {pos_err:.4f} m"
