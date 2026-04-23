@@ -26,6 +26,18 @@ _SYSTEM = SYSTEM_PROMPT + "\n\n" + AVAILABLE_TOOLS
 _MAX_CONSECUTIVE_ERRORS = 3
 
 
+def _strip_code_fence(text: str) -> str:
+    """Remove markdown code fences that some models wrap JSON in."""
+    text = text.strip()
+    if text.startswith("```"):
+        # Drop the opening fence line (```json or just ```)
+        text = text.split("\n", 1)[-1]
+        # Drop the closing fence
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
 def run_agent_loop(
     task: str,
     get_poses_fn: Callable[[], dict],
@@ -90,7 +102,7 @@ def run_agent_loop(
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": state_prompt}],
             )
-            raw_text = response.content[0].text.strip()
+            raw_text = _strip_code_fence(response.content[0].text)
         except Exception as exc:
             last_result = {"status": "error", "reason": f"LLM API error: {exc}"}
             history.append({"step": step, "action": None, "result": last_result})
