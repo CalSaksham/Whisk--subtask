@@ -180,11 +180,40 @@ class PlacoKinematics:
         Solve IK for the end-effector pose and return joint positions,
         or None if the QP doesn't converge to tolerance within the
         iteration budget.
-        """
-        T_target = _pose_to_transform(pose_xyz_yaw, self._urdf_is_y_up)
 
+        Position is a *hard* constraint; yaw is a *soft* axis-alignment
+        constraint so the arm is free to adopt whatever pitch/roll is
+        natural for the configuration.  Full 6-DOF orientation constraints
+        overconstrain the SO-101 (which has limited wrist pitch/roll range)
+        and prevent convergence for many reachable positions.
+        """
+        x, y, z, yaw = float(pose_xyz_yaw[0]), float(pose_xyz_yaw[1]), \
+                        float(pose_xyz_yaw[2]), float(pose_xyz_yaw[3])
+
+        # Position target in URDF frame (z-up swap when needed).
+        if self._urdf_is_y_up:
+            target_pos = np.array([x, y, z], dtype=float)
+        else:
+            target_pos = _Y_UP_TO_Z_UP @ np.array([x, y, z], dtype=float)
+
+        # Yaw → world direction the EE x-axis should point toward (in URDF frame).
+        c, s = math.cos(yaw), math.sin(yaw)
+        if self._urdf_is_y_up:
+            # Yaw about +y: x-axis rotates in XZ plane.
+            world_x = np.array([c, 0.0, -s], dtype=float)
+        else:
+            # Yaw about +y (executor) = yaw about +z (URDF z-up).
+            world_x = np.array([c, s, 0.0], dtype=float)
+
+        # Always reset to the seed configuration before solving so the QP
+        # does not inherit a state left over from the previous call.
+        # Without a reset, a hard position constraint can become infeasible
+        # when the previous solution is far from the new target.
         if self._seed_joints is not None:
             self._set_joints(self._seed_joints)
+        else:
+            # Default seed: all-zero joint configuration.
+            self._robot.state.q = np.zeros(self._robot.model.nq, dtype=float)
         # placo-api: update_kinematics() is the usual forward-propagation call.
         self._robot.update_kinematics()
 
@@ -192,22 +221,40 @@ class PlacoKinematics:
         # solver instance, so reusing it between calls with different
         # targets would require explicit task removal.
         solver = placo.KinematicsSolver(self._robot)
-        # placo-api: add_frame_task(frame_name, T_world_frame_target)
-        frame_task = solver.add_frame_task(self._frame, T_target)
-        # placo-api: configure(name, priority, position_weight, orientation_weight)
-        frame_task.configure(self._frame, "soft", 1.0, 1.0)
+        # Fix the robot base — SO-101 is a fixed-base arm, not a mobile
+        # platform.  Without this the solver moves the floating root joint
+        # to trivially reach any target.
+        solver.mask_fbase(True)
+
+        # Hard position constraint — achieves <1 mm accuracy in ~3 iterations
+        # for reachable poses.  Starting from zero config (above) prevents
+        # the QP from inheriting an infeasible starting state.
+        # placo-api: add_position_task(frame, target_xyz)
+        pos_task = solver.add_position_task(self._frame, target_pos)
+        pos_task.configure("pos", "hard", 1.0)
+
+        # Soft yaw constraint: EE local x-axis aligns with world_x direction.
+        # placo-api: add_axisalign_task(frame, local_axis, world_axis)
+        yaw_task = solver.add_axisalign_task(
+            self._frame, np.array([1.0, 0.0, 0.0]), world_x
+        )
+        yaw_task.configure("yaw", "soft", 0.1)
 
         for _ in range(self._max_iters):
             # placo-api: solve(apply=True) integrates the velocity into
             # the robot state.  Some versions expose step() or require
             # a manual `q += qd * dt` update.
-            solver.solve(True)
+            # RuntimeError is raised when the QP is infeasible (pose is
+            # outside the reachable workspace given joint limits).
+            try:
+                solver.solve(True)
+            except RuntimeError:
+                return None
             self._robot.update_kinematics()
 
             T_current = self._get_frame_transform(self._frame)
-            pos_err = float(np.linalg.norm(T_current[:3, 3] - T_target[:3, 3]))
-            ori_err = _rotation_angle(T_current[:3, :3].T @ T_target[:3, :3])
-            if pos_err < self._pos_tol and ori_err < self._ori_tol:
+            pos_err = float(np.linalg.norm(T_current[:3, 3] - target_pos))
+            if pos_err < self._pos_tol:
                 return self._get_joints()
 
         return None
